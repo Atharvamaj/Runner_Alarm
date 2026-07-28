@@ -1,0 +1,733 @@
+#include <Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <IRremote.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+Servo leftServo;
+Servo rightServo;
+
+const int alarmPin = 8;
+const int tiltPin = 5;
+const int pirPin = 9;
+const int irPin = 2;
+
+const int leftServoPin = 7;
+const int rightServoPin = 6;
+
+const int trigPin = 3;
+const int echoPin = 4;
+
+const int stopSpeed = 90;
+const int forwardSpeed = 120;
+const int backwardSpeed = 60;
+
+const int detectDistance = 20;
+
+const int backTime = 500;
+const int turnTime = 650;
+
+int bedTimeHour = 20;
+int bedTimeMinute = 0;
+int bedTimeRange = 10;
+
+int alarmHour = 6;
+int alarmMinute = 0;
+
+int hourNow = 0;
+int minuteNow = 0;
+int secondNow = 0;
+
+unsigned long startMillis = 0;
+unsigned long startSeconds = 0;
+
+bool bedDetected = false;
+bool alarmOn = false;
+bool alarmStopped = false;
+
+int screenMode = 0;
+int menuChoice = 0;
+
+unsigned long lastLCDUpdate = 0;
+
+unsigned long lastButtonTime = 0;
+const unsigned long menuTimeout = 15000;
+
+const int messageDelay = 1400;
+
+const int IR_UP = 0x18;
+const int IR_DOWN = 0x52;
+const int IR_OK = 0x1C;
+const int IR_BACK = 0x0D;
+
+void setup() {
+  pinMode(alarmPin, OUTPUT);
+  pinMode(tiltPin, INPUT);
+  pinMode(pirPin, INPUT);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  Serial.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+
+  IrReceiver.begin(irPin, ENABLE_LED_FEEDBACK);
+
+  randomSeed(analogRead(A0));
+
+  setTimeFromUpload();
+
+  stopRobot();
+  noTone(alarmPin);
+
+  lcd.clear();
+  printLine(0, "Alarm Clock Bot");
+  printLine(1, "Starting...");
+  delay(1800);
+}
+
+void loop() {
+  updateTime();
+  readIR();
+  checkMenuTimeout();
+
+  if (screenMode != 0) {
+    stopRobot();
+    noTone(alarmPin);
+    showLCD();
+    delay(100);
+    return;
+  }
+
+  showLCD();
+
+  if (digitalRead(tiltPin) == HIGH) {
+    alarmOn = false;
+    alarmStopped = true;
+
+    stopRobot();
+    noTone(alarmPin);
+
+    printLine(0, "Alarm Stopped");
+    printLine(1, "Tilt detected");
+    delay(messageDelay);
+    return;
+  }
+
+  if (alarmStopped == true) {
+    stopRobot();
+    noTone(alarmPin);
+    delay(300);
+    return;
+  }
+
+  if (bedDetected == false) {
+    if (isBedTime() == true && digitalRead(pirPin) == HIGH) {
+      bedDetected = true;
+
+      printLine(0, "Bed Detected");
+      printLine(1, "Alarm Armed");
+      delay(messageDelay);
+    } 
+    else {
+      stopRobot();
+      noTone(alarmPin);
+      delay(300);
+      return;
+    }
+  }
+
+  if (bedDetected == true && isAlarmTime() == true) {
+    alarmOn = true;
+  }
+
+  if (alarmOn == false) {
+    stopRobot();
+    noTone(alarmPin);
+    delay(300);
+    return;
+  }
+
+  alarmBeep();
+  robotMove();
+}
+
+void readIR() {
+  if (IrReceiver.decode()) {
+    int buttonCommand = IrReceiver.decodedIRData.command;
+
+    Serial.print("IR Command: 0x");
+    Serial.println(buttonCommand, HEX);
+
+    lastButtonTime = millis();
+
+    handleButton(buttonCommand);
+
+    IrReceiver.resume();
+  }
+}
+
+void checkMenuTimeout() {
+  if (screenMode == 1) {
+    if (millis() - lastButtonTime > menuTimeout) {
+      screenMode = 0;
+      printLine(0, "Menu Timeout");
+      printLine(1, "Back to clock");
+      delay(messageDelay);
+    }
+  }
+}
+
+void handleButton(int button) {
+  if (screenMode == 0) {
+    if (button == IR_OK) {
+      screenMode = 1;
+      menuChoice = 0;
+      lastButtonTime = millis();
+    }
+    return;
+  }
+
+  if (screenMode == 1) {
+    if (button == IR_UP) {
+      menuChoice--;
+      if (menuChoice < 0) {
+        menuChoice = 3;
+      }
+    }
+
+    if (button == IR_DOWN) {
+      menuChoice++;
+      if (menuChoice > 3) {
+        menuChoice = 0;
+      }
+    }
+
+    if (button == IR_OK) {
+      if (menuChoice == 0) {
+        screenMode = 2;
+      }
+      else if (menuChoice == 1) {
+        screenMode = 4;
+      }
+      else if (menuChoice == 2) {
+        screenMode = 7;
+      }
+      else if (menuChoice == 3) {
+        screenMode = 6;
+      }
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 0;
+    }
+
+    return;
+  }
+
+  if (screenMode == 2) {
+    if (button == IR_UP) {
+      hourNow++;
+      if (hourNow > 23) hourNow = 0;
+      resetClockStart();
+    }
+
+    if (button == IR_DOWN) {
+      hourNow--;
+      if (hourNow < 0) hourNow = 23;
+      resetClockStart();
+    }
+
+    if (button == IR_OK) {
+      screenMode = 3;
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 1;
+    }
+
+    return;
+  }
+
+  if (screenMode == 3) {
+    if (button == IR_UP) {
+      minuteNow++;
+      if (minuteNow > 59) minuteNow = 0;
+      secondNow = 0;
+      resetClockStart();
+    }
+
+    if (button == IR_DOWN) {
+      minuteNow--;
+      if (minuteNow < 0) minuteNow = 59;
+      secondNow = 0;
+      resetClockStart();
+    }
+
+    if (button == IR_OK) {
+      screenMode = 0;
+      printLine(0, "Clock Saved");
+      printLine(1, "Back to clock");
+      delay(messageDelay);
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 2;
+    }
+
+    return;
+  }
+
+  if (screenMode == 4) {
+    if (button == IR_UP) {
+      alarmHour++;
+      if (alarmHour > 23) alarmHour = 0;
+    }
+
+    if (button == IR_DOWN) {
+      alarmHour--;
+      if (alarmHour < 0) alarmHour = 23;
+    }
+
+    if (button == IR_OK) {
+      screenMode = 5;
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 1;
+    }
+
+    return;
+  }
+
+  if (screenMode == 5) {
+    if (button == IR_UP) {
+      alarmMinute++;
+      if (alarmMinute > 59) alarmMinute = 0;
+    }
+
+    if (button == IR_DOWN) {
+      alarmMinute--;
+      if (alarmMinute < 0) alarmMinute = 59;
+    }
+
+    if (button == IR_OK) {
+      screenMode = 0;
+
+      alarmOn = false;
+      alarmStopped = false;
+
+      printLine(0, "Alarm Saved");
+      printLine(1, "Back to clock");
+      delay(messageDelay);
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 4;
+    }
+
+    return;
+  }
+
+  if (screenMode == 6) {
+    if (button == IR_BACK) {
+      screenMode = 1;
+    }
+
+    return;
+  }
+
+  if (screenMode == 7) {
+    if (button == IR_UP) {
+      bedTimeHour++;
+      if (bedTimeHour > 23) bedTimeHour = 0;
+    }
+
+    if (button == IR_DOWN) {
+      bedTimeHour--;
+      if (bedTimeHour < 0) bedTimeHour = 23;
+    }
+
+    if (button == IR_OK) {
+      screenMode = 8;
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 1;
+    }
+
+    return;
+  }
+
+  if (screenMode == 8) {
+    if (button == IR_UP) {
+      bedTimeMinute++;
+      if (bedTimeMinute > 59) bedTimeMinute = 0;
+    }
+
+    if (button == IR_DOWN) {
+      bedTimeMinute--;
+      if (bedTimeMinute < 0) bedTimeMinute = 59;
+    }
+
+    if (button == IR_OK) {
+      screenMode = 0;
+
+      bedDetected = false;
+      alarmOn = false;
+      alarmStopped = false;
+
+      printLine(0, "Bedtime Saved");
+      printLine(1, "Back to clock");
+      delay(messageDelay);
+    }
+
+    if (button == IR_BACK) {
+      screenMode = 7;
+    }
+
+    return;
+  }
+}
+
+void showLCD() {
+  if (millis() - lastLCDUpdate < 300) {
+    return;
+  }
+
+  lastLCDUpdate = millis();
+
+  if (screenMode == 0) {
+    showNormalScreen();
+  }
+  else if (screenMode == 1) {
+    showMenuScreen();
+  }
+  else if (screenMode == 2) {
+    showSetClockHour();
+  }
+  else if (screenMode == 3) {
+    showSetClockMinute();
+  }
+  else if (screenMode == 4) {
+    showSetAlarmHour();
+  }
+  else if (screenMode == 5) {
+    showSetAlarmMinute();
+  }
+  else if (screenMode == 6) {
+    showEightBall();
+  }
+  else if (screenMode == 7) {
+    showSetBedHour();
+  }
+  else if (screenMode == 8) {
+    showSetBedMinute();
+  }
+}
+
+void showNormalScreen() {
+  String line1 = "Time ";
+
+  if (hourNow < 10) line1 += "0";
+  line1 += String(hourNow);
+  line1 += ":";
+
+  if (minuteNow < 10) line1 += "0";
+  line1 += String(minuteNow);
+  line1 += ":";
+
+  if (secondNow < 10) line1 += "0";
+  line1 += String(secondNow);
+
+  printLine(0, line1);
+
+  if (alarmStopped == true) {
+    printLine(1, "Alarm Stopped");
+  }
+  else if (alarmOn == true) {
+    printLine(1, "ALARM ON");
+  }
+  else if (bedDetected == true) {
+    printLine(1, "Bed Yes Armed");
+  }
+  else if (isBedTime() == true) {
+    printLine(1, "PIR Bed Range");
+  }
+  else {
+    printLine(1, "PIR Off");
+  }
+}
+
+void showMenuScreen() {
+  printLine(0, "MENU");
+
+  if (menuChoice == 0) {
+    printLine(1, "> Change Clock");
+  }
+  else if (menuChoice == 1) {
+    printLine(1, "> Change Alarm");
+  }
+  else if (menuChoice == 2) {
+    printLine(1, "> Bedtime");
+  }
+  else if (menuChoice == 3) {
+    printLine(1, "> 8 Ball");
+  }
+}
+
+void showSetClockHour() {
+  printLine(0, "Set Clock Hour");
+
+  String line = "Hour: ";
+  if (hourNow < 10) line += "0";
+  line += String(hourNow);
+
+  printLine(1, line);
+}
+
+void showSetClockMinute() {
+  printLine(0, "Set Clock Min");
+
+  String line = "Min: ";
+  if (minuteNow < 10) line += "0";
+  line += String(minuteNow);
+
+  printLine(1, line);
+}
+
+void showSetAlarmHour() {
+  printLine(0, "Set Alarm Hour");
+
+  String line = "Hour: ";
+  if (alarmHour < 10) line += "0";
+  line += String(alarmHour);
+
+  printLine(1, line);
+}
+
+void showSetAlarmMinute() {
+  printLine(0, "Set Alarm Min");
+
+  String line = "Min: ";
+  if (alarmMinute < 10) line += "0";
+  line += String(alarmMinute);
+
+  printLine(1, line);
+}
+
+void showSetBedHour() {
+  printLine(0, "Set Bed Hour");
+
+  String line = "Hour: ";
+  if (bedTimeHour < 10) line += "0";
+  line += String(bedTimeHour);
+
+  printLine(1, line);
+}
+
+void showSetBedMinute() {
+  printLine(0, "Set Bed Min");
+
+  String line = "Min: ";
+  if (bedTimeMinute < 10) line += "0";
+  line += String(bedTimeMinute);
+
+  printLine(1, line);
+}
+
+void showEightBall() {
+  printLine(0, "8 Ball Mode");
+
+  if (digitalRead(tiltPin) == HIGH) {
+    int answer = random(0, 5);
+
+    if (answer == 0) {
+      printLine(1, "Yes");
+    }
+    else if (answer == 1) {
+      printLine(1, "No");
+    }
+    else if (answer == 2) {
+      printLine(1, "Maybe");
+    }
+    else if (answer == 3) {
+      printLine(1, "Sure");
+    }
+    else {
+      printLine(1, "Ask again");
+    }
+
+    delay(1200);
+  }
+  else {
+    printLine(1, "Flip the bot");
+  }
+}
+
+void printLine(int row, String text) {
+  lcd.setCursor(0, row);
+
+  while (text.length() < 16) {
+    text += " ";
+  }
+
+  if (text.length() > 16) {
+    text = text.substring(0, 16);
+  }
+
+  lcd.print(text);
+}
+
+void setTimeFromUpload() {
+  String t = __TIME__;
+
+  hourNow = t.substring(0, 2).toInt();
+  minuteNow = t.substring(3, 5).toInt();
+  secondNow = t.substring(6, 8).toInt();
+
+  resetClockStart();
+}
+
+void resetClockStart() {
+  startSeconds = hourNow * 3600UL + minuteNow * 60UL + secondNow;
+  startMillis = millis();
+}
+
+void updateTime() {
+  unsigned long secondsPassed = (millis() - startMillis) / 1000;
+  unsigned long totalSeconds = startSeconds + secondsPassed;
+
+  totalSeconds = totalSeconds % 86400UL;
+
+  hourNow = totalSeconds / 3600;
+  totalSeconds = totalSeconds % 3600;
+
+  minuteNow = totalSeconds / 60;
+  secondNow = totalSeconds % 60;
+}
+
+bool isBedTime() {
+  int currentTotalMinutes = hourNow * 60 + minuteNow;
+  int bedTotalMinutes = bedTimeHour * 60 + bedTimeMinute;
+
+  int startTime = bedTotalMinutes - bedTimeRange;
+  int endTime = bedTotalMinutes + bedTimeRange;
+
+  if (currentTotalMinutes >= startTime && currentTotalMinutes <= endTime) {
+    return true;
+  } 
+  else {
+    return false;
+  }
+}
+
+bool isAlarmTime() {
+  if (hourNow == alarmHour && minuteNow >= alarmMinute) {
+    return true;
+  } 
+  else {
+    return false;
+  }
+}
+
+void robotMove() {
+  int distance = getDistance();
+
+  if (distance > 0 && distance <= detectDistance) {
+    stopRobot();
+    delay(200);
+
+    moveBackward();
+    delay(backTime);
+
+    stopRobot();
+    delay(200);
+
+    turnRight();
+    delay(turnTime);
+
+    stopRobot();
+    delay(200);
+  } 
+  else {
+    moveForward();
+  }
+}
+
+int getDistance() {
+  long duration;
+  int cm;
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH, 20000);
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  cm = duration * 0.034 / 2;
+  return cm;
+}
+
+void attachServos() {
+  if (!leftServo.attached()) {
+    leftServo.attach(leftServoPin);
+  }
+
+  if (!rightServo.attached()) {
+    rightServo.attach(rightServoPin);
+  }
+}
+
+void moveForward() {
+  attachServos();
+
+  leftServo.write(forwardSpeed);
+  rightServo.write(backwardSpeed);
+}
+
+void moveBackward() {
+  attachServos();
+
+  leftServo.write(backwardSpeed);
+  rightServo.write(forwardSpeed);
+}
+
+void turnRight() {
+  attachServos();
+
+  leftServo.write(forwardSpeed);
+  rightServo.write(forwardSpeed);
+}
+
+void stopRobot() {
+  if (leftServo.attached()) {
+    leftServo.write(stopSpeed);
+  }
+
+  if (rightServo.attached()) {
+    rightServo.write(stopSpeed);
+  }
+
+  delay(20);
+
+  leftServo.detach();
+  rightServo.detach();
+}
+
+void alarmBeep() {
+  tone(alarmPin, 500);
+  delay(100);
+  noTone(alarmPin);
+  delay(100);
+}
