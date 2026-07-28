@@ -1,4 +1,4 @@
-# Runner_Alarm
+# Runner_UP
 A alarm clock that run away from you. 
 
 
